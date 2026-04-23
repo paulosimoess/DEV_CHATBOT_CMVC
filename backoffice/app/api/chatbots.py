@@ -265,7 +265,7 @@ def criar_chatbot():
                 genero,
                 video_enabled
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (nome) DO NOTHING
             RETURNING chatbot_id
             """,
