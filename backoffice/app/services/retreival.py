@@ -177,32 +177,72 @@ def get_faqs_from_db(chatbot_id=None, idioma=None):
 def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
     from rapidfuzz import fuzz
     from .text import preprocess_text_for_matching
+
     conn = get_conn()
     cur = conn.cursor()
     try:
         idioma_norm = (idioma or "").strip().lower()[:2] if idioma else None
         if idioma_norm and idioma_norm in {"pt", "en"}:
             cur.execute(
-                "SELECT faq_id, pergunta, resposta FROM faq WHERE chatbot_id = %s AND idioma = %s",
+                """
+                SELECT faq_id, pergunta, resposta, designacao, serve_text
+                FROM faq
+                WHERE chatbot_id = %s AND idioma = %s
+                """,
                 (chatbot_id, idioma_norm),
             )
         else:
-            cur.execute("SELECT faq_id, pergunta, resposta FROM faq WHERE chatbot_id = %s", (chatbot_id,))
+            cur.execute(
+                """
+                SELECT faq_id, pergunta, resposta, designacao, serve_text
+                FROM faq
+                WHERE chatbot_id = %s
+                """,
+                (chatbot_id,),
+            )
+
         faqs = cur.fetchall()
         if not faqs:
             return None
+
         pergunta_processed = preprocess_text_for_matching(pergunta)
         melhor_score = 0
         melhor_faq = None
-        for faq_id, pergunta_faq, resposta in faqs:
-            pergunta_faq_processed = preprocess_text_for_matching(pergunta_faq)
-            score = max(
-                fuzz.ratio(pergunta_processed, pergunta_faq_processed),
-                fuzz.token_set_ratio(pergunta_processed, pergunta_faq_processed),
-            )
-            if score > melhor_score:
-                melhor_score = score
-                melhor_faq = {"faq_id": faq_id, "pergunta": pergunta_faq, "resposta": resposta, "score": score}
+
+        for faq_id, pergunta_faq, resposta, designacao, serve_text in faqs:
+            candidatos = [
+                pergunta_faq or "",
+                designacao or "",
+                serve_text or "",
+            ]
+
+            scores = []
+            for candidato in candidatos:
+                candidato_processed = preprocess_text_for_matching(candidato)
+                if not candidato_processed:
+                    continue
+
+                score = max(
+                    fuzz.ratio(pergunta_processed, candidato_processed),
+                    fuzz.token_set_ratio(pergunta_processed, candidato_processed),
+                    fuzz.partial_ratio(pergunta_processed, candidato_processed),
+                )
+                scores.append(score)
+
+            if not scores:
+                continue
+
+            score_final = max(scores)
+
+            if score_final > melhor_score:
+                melhor_score = score_final
+                melhor_faq = {
+                    "faq_id": faq_id,
+                    "pergunta": pergunta_faq,
+                    "resposta": resposta,
+                    "score": score_final,
+                }
+
         if melhor_faq and melhor_faq["score"] >= threshold:
             return melhor_faq
         return None
