@@ -29,21 +29,19 @@ def preprocess_text(text):
     return text
 
 def detectar_saudacao(pergunta):
-    texto = pergunta.strip().lower()
-    palavras = set(texto.replace("?", "").replace("!", "").replace(".", "").split())
-    for saud in SAUDACOES_PT:
-        for palavra in palavras:
-            if saud == palavra:
-                return RESPOSTA_SAUDACAO_PT
-    for p in SAUDACOES_PERGUNTAS_PT:
-        if p == texto:
-            return RESPOSTA_TUDO_BEM_PT
-    for saud in SAUDACOES_EN:
-        if saud in texto:
-            return RESPOSTA_SAUDACAO_EN
-    for p in SAUDACOES_PERGUNTAS_EN:
-        if p in texto:
-            return RESPOSTA_TUDO_BEM_EN
+    texto = unidecode(pergunta.strip().lower())
+    texto = re.sub(r"[^\w\s]", "", texto)
+    texto = " ".join(texto.split())
+
+    if texto in SAUDACOES_PT:
+        return RESPOSTA_SAUDACAO_PT
+    if texto in SAUDACOES_PERGUNTAS_PT:
+        return RESPOSTA_TUDO_BEM_PT
+    if texto in SAUDACOES_EN:
+        return RESPOSTA_SAUDACAO_EN
+    if texto in SAUDACOES_PERGUNTAS_EN:
+        return RESPOSTA_TUDO_BEM_EN
+
     return None
 
 
