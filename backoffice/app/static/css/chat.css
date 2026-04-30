@@ -64,6 +64,7 @@
   flex-direction: row;
   background: #f9fafb;
   overflow: hidden;
+  min-height: 0;
 }
 
 .chat-avatar-column {
@@ -76,6 +77,16 @@
   flex-direction: column;
   align-items: center;
   box-sizing: border-box;
+  min-height: 0;
+}
+
+.chat-conversation-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: #f9fafb;
 }
 
 .chat-avatar-header-row {
@@ -121,7 +132,6 @@
   height: 230px;
   max-height: 230px;
   border-radius: inherit;
-  /* Fill the box without cropping/"zoom" (may slightly distort if ratios differ) */
   object-fit: fill;
   object-position: center;
   display: block;
@@ -134,7 +144,6 @@
   display: none;
   align-items: center;
   justify-content: center;
-  /* Keep the avatar image visible while showing spinner */
   background: rgba(240, 240, 240, 0.15);
   z-index: 2;
 }
@@ -162,6 +171,7 @@
   margin-top: 16px;
   flex: 1 1 auto;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .chat-suggestions .sugestoes-title {
@@ -283,6 +293,7 @@
 
 .chat-body {
   flex: 1;
+  min-height: 0;
   padding: 18px 18px 18px 18px;
   background: #f9fafb;
   overflow-y: auto;
@@ -459,6 +470,7 @@
   gap: 8px;
   align-items: center;
   min-height: 60px;
+  flex-shrink: 0;
 }
 
 .chat-input input {
@@ -581,6 +593,7 @@
   height: 100%;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .chat-toggle-btn:hover {
@@ -735,6 +748,10 @@
     border-right: none;
     border-bottom: 1px solid #e2e2e2;
     padding: 10px 12px 8px;
+  }
+
+  .chat-conversation-column {
+    min-height: 0;
   }
 
   .chat-body {

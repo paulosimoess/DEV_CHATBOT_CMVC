@@ -370,34 +370,36 @@
             <div class="chat-suggestions" id="chatAvatarSuggestions"></div>
           </div>
 
-          <div class="chat-body" id="chatBody"></div>
-        </div>
+          <div class="chat-conversation-column">
+            <div class="chat-body" id="chatBody"></div>
 
-        <div class="chat-input">
-          <input
-            type="text"
-            placeholder="Digite uma mensagem..."
-            id="chatInput"
-            onkeydown="if(event.key==='Enter') enviarPergunta()"
-          />
-          <button
-            id="chatMicBtn"
-            class="chat-mic-btn"
-            type="button"
-            onclick="toggleMic()"
-            title="Usar o microfone"
-          >
-            <span class="mic-icon">🎤</span>
-          </button>
-          <button
-            id="chatSendBtn"
-            class="chat-send-btn"
-            type="button"
-            onclick="enviarPergunta()"
-            title="Enviar"
-          >
-            ➤
-          </button>
+            <div class="chat-input">
+              <input
+                type="text"
+                placeholder="Digite uma mensagem..."
+                id="chatInput"
+                onkeydown="if(event.key==='Enter') enviarPergunta()"
+              />
+              <button
+                id="chatMicBtn"
+                class="chat-mic-btn"
+                type="button"
+                onclick="toggleMic()"
+                title="Usar o microfone"
+              >
+                <span class="mic-icon">🎤</span>
+              </button>
+              <button
+                id="chatSendBtn"
+                class="chat-send-btn"
+                type="button"
+                onclick="enviarPergunta()"
+                title="Enviar"
+              >
+                ➤
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
