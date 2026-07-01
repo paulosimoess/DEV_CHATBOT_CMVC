@@ -7,6 +7,8 @@ import logging
 from ..config import Config
 import os
 from .text import preprocess_text
+import re
+import unicodedata
 
 embedding_model = SentenceTransformer('all-MiniLM-L12-v2')
 PDF_STORAGE_PATH = Config.PDF_STORAGE_PATH
@@ -174,14 +176,122 @@ def get_faqs_from_db(chatbot_id=None, idioma=None):
     finally:
         cur.close()
 
+STOPWORDS_MATCH = {
+    "como", "posso", "pode", "para", "uma", "um", "uns", "umas",
+    "que", "qual", "quais", "onde", "quando", "tenho", "devo",
+    "fazer", "pedir", "pedido", "preciso", "necessario", "necessaria",
+    "o", "a", "os", "as", "de", "da", "do", "das", "dos", "em",
+    "no", "na", "nos", "nas", "por", "com", "ao", "aos", "me", "minha",
+    "meu", "se", "e"
+}
+
+TERMOS_GENERICOS_MATCH = {
+    "licenca", "licencas", "autorizacao", "autorizacoes",
+    "permissao", "permissoes", "pedido", "pedidos", "municipal"
+}
+
+
+def normalizar_texto_match(texto):
+    texto = str(texto or "").lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    texto = re.sub(r"[^a-z0-9\s]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto
+
+
+def extrair_termos_match(texto):
+    texto_norm = normalizar_texto_match(texto)
+
+    termos = {
+        termo for termo in texto_norm.split()
+        if len(termo) >= 3 and termo not in STOPWORDS_MATCH
+    }
+
+    expandidos = set(termos)
+
+    for termo in list(termos):
+        if termo.startswith("renov"):
+            expandidos.update({
+                "renovar", "renovacao", "renovo",
+                "caducidade", "caducar", "validade"
+            })
+
+        if termo in {"licenca", "licencas"}:
+            expandidos.update({
+                "licenca", "licencas", "autorizacao", "permissao"
+            })
+
+        if termo in {"autorizacao", "autorizar", "autorizacoes"}:
+            expandidos.update({
+                "licenca", "autorizacao", "permissao"
+            })
+
+        if termo in {"rua", "via", "passeio"}:
+            expandidos.update({
+                "rua", "via", "publica", "espaco", "publico", "passeio"
+            })
+
+        if termo in {"espaco", "publico", "publica"}:
+            expandidos.update({
+                "espaco", "publico", "publica", "via", "rua"
+            })
+
+        if termo in {"donativo", "donativos", "peditorio", "peditorios"}:
+            expandidos.update({
+                "donativo", "donativos", "peditorio",
+                "peditorios", "angariar", "fundos"
+            })
+
+        if termo in {"angariar", "fundos"}:
+            expandidos.update({
+                "donativo", "donativos", "peditorio", "peditorios",
+                "angariar", "fundos"
+            })
+
+        if termo in {"acabar", "caducar", "caducidade", "validade"}:
+            expandidos.update({
+                "renovar", "renovacao", "licenca",
+                "caducidade", "validade"
+            })
+
+        if termo in {"contacto", "contactos", "telefone", "email", "morada", "horario"}:
+            expandidos.update({
+                "contacto", "contactos", "telefone",
+                "email", "morada", "horario", "atendimento"
+            })
+
+        if termo in {"camara", "municipio", "autarquia"}:
+            expandidos.update({
+                "camara", "municipio", "autarquia"
+            })
+
+    return expandidos
+
+
+def tem_relacao_semantica_forte(pergunta_utilizador, texto_faq):
+    termos_pergunta = extrair_termos_match(pergunta_utilizador)
+    termos_faq = extrair_termos_match(texto_faq)
+
+    comuns = termos_pergunta.intersection(termos_faq)
+
+    termos_fortes = {
+        termo for termo in comuns
+        if termo not in TERMOS_GENERICOS_MATCH
+    }
+
+    return len(termos_fortes) > 0
+
 def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
     from rapidfuzz import fuzz
     from .text import preprocess_text_for_matching
 
     conn = get_conn()
     cur = conn.cursor()
+
     try:
         idioma_norm = (idioma or "").strip().lower()[:2] if idioma else None
+
         if idioma_norm and idioma_norm in {"pt", "en"}:
             cur.execute(
                 """
@@ -202,14 +312,34 @@ def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
             )
 
         faqs = cur.fetchall()
+
         if not faqs:
             return None
 
         pergunta_processed = preprocess_text_for_matching(pergunta)
+        pergunta_norm = normalizar_texto_match(pergunta)
+
         melhor_score = 0
         melhor_faq = None
 
         for faq_id, pergunta_faq, resposta, designacao, serve_text in faqs:
+            pergunta_faq_norm = normalizar_texto_match(pergunta_faq)
+            designacao_norm = normalizar_texto_match(designacao)
+
+            # Correspondência exata:
+            # se o utilizador clicar numa sugestão ou escrever exatamente
+            # a pergunta/designação da FAQ, devolver imediatamente essa FAQ.
+            if pergunta_norm and (
+                pergunta_norm == pergunta_faq_norm
+                or pergunta_norm == designacao_norm
+            ):
+                return {
+                    "faq_id": faq_id,
+                    "pergunta": pergunta_faq,
+                    "resposta": resposta,
+                    "score": 100,
+                }
+
             candidatos = [
                 pergunta_faq or "",
                 designacao or "",
@@ -217,8 +347,10 @@ def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
             ]
 
             scores = []
+
             for candidato in candidatos:
                 candidato_processed = preprocess_text_for_matching(candidato)
+
                 if not candidato_processed:
                     continue
 
@@ -227,12 +359,31 @@ def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
                     fuzz.token_set_ratio(pergunta_processed, candidato_processed),
                     fuzz.partial_ratio(pergunta_processed, candidato_processed),
                 )
+
                 scores.append(score)
 
             if not scores:
                 continue
 
             score_final = max(scores)
+
+            texto_faq_completo = " ".join([
+                pergunta_faq or "",
+                designacao or "",
+                serve_text or "",
+            ])
+
+            faq_norm = normalizar_texto_match(texto_faq_completo)
+
+            # Evita falsos positivos baseados apenas em termos genéricos,
+            # como "licença".
+            # Exemplo: "Quero pedir donativos na rua, preciso de licença?"
+            # não deve devolver "Renovação da Licença" só porque ambas têm "licença".
+            if (
+                pergunta_norm != faq_norm
+                and not tem_relacao_semantica_forte(pergunta, texto_faq_completo)
+            ):
+                continue
 
             if score_final > melhor_score:
                 melhor_score = score_final
@@ -245,6 +396,8 @@ def obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=None, threshold=70):
 
         if melhor_faq and melhor_faq["score"] >= threshold:
             return melhor_faq
+
         return None
+
     finally:
         cur.close()
