@@ -5,9 +5,145 @@ from ..services.text import detectar_saudacao, registar_pergunta_nao_respondida,
 from ..services.retreival import obter_faq_mais_semelhante, pesquisar_faiss, build_faiss_index
 from ..services.rag import pesquisar_pdf_pgvector, obter_mensagem_sem_resposta
 import traceback
+import re
+import unicodedata
 
 app = Blueprint('respostas', __name__)
 
+
+STOPWORDS_FAQ = {
+    "como", "posso", "pode", "para", "uma", "um", "uns", "umas",
+    "que", "qual", "quais", "onde", "quando", "tenho", "devo",
+    "fazer", "pedir", "pedido", "preciso", "necessario", "necessaria",
+    "o", "a", "os", "as", "de", "da", "do", "das", "dos", "em",
+    "no", "na", "nos", "nas", "por", "com", "ao", "aos", "me", "minha",
+    "meu", "se", "e"
+}
+
+
+def normalizar_texto_faq(texto):
+    texto = str(texto or "").lower()
+    texto = unicodedata.normalize("NFD", texto)
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    texto = re.sub(r"[^a-z0-9\s]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto).strip()
+    return texto
+
+
+def extrair_termos_faq(texto):
+    texto_norm = normalizar_texto_faq(texto)
+
+    termos = {
+        termo for termo in texto_norm.split()
+        if len(termo) >= 3 and termo not in STOPWORDS_FAQ
+    }
+
+    expandidos = set(termos)
+
+    for termo in list(termos):
+        if termo.startswith("renov"):
+            expandidos.update({
+                "renovar", "renovacao", "renovo",
+                "caducidade", "caducar", "validade"
+            })
+
+        if termo in {"licenca", "licencas"}:
+            expandidos.update({
+                "licenca", "licencas", "autorizacao", "permissao"
+            })
+
+        if termo in {"autorizacao", "autorizar", "autorizacoes"}:
+            expandidos.update({
+                "licenca", "autorizacao", "permissao"
+            })
+
+        if termo in {"camara", "municipio", "autarquia"}:
+            expandidos.update({
+                "camara", "municipio", "autarquia"
+            })
+
+        if termo in {"rua", "via", "passeio"}:
+            expandidos.update({
+                "rua", "via", "publica", "espaco", "publico", "passeio"
+            })
+
+        if termo in {"espaco", "publico", "publica"}:
+            expandidos.update({
+                "espaco", "publico", "publica", "via", "rua"
+            })
+
+        if termo in {"donativo", "donativos", "peditorio", "peditorios"}:
+            expandidos.update({
+                "donativo", "donativos", "peditorio",
+                "peditorios", "angariar", "fundos"
+            })
+
+        if termo in {"acabar", "caducar", "caducidade", "validade"}:
+            expandidos.update({
+                "renovar", "renovacao", "licenca",
+                "caducidade", "validade"
+            })
+
+        if termo in {"contacto", "contactos", "telefone", "email", "morada", "horario"}:
+            expandidos.update({
+                "contacto", "contactos", "telefone",
+                "email", "morada", "horario", "atendimento"
+            })
+
+    return expandidos
+
+
+def procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma="pt", limite=5):
+    termos_pergunta = extrair_termos_faq(pergunta)
+
+    if not termos_pergunta:
+        return []
+
+    cur.execute("""
+        SELECT faq_id, pergunta
+        FROM faq
+        WHERE chatbot_id = %s AND idioma = %s
+    """, (chatbot_id, idioma))
+
+    faqs = cur.fetchall()
+    resultados = []
+
+    pergunta_norm = normalizar_texto_faq(pergunta)
+
+    for faq_id, pergunta_faq in faqs:
+        pergunta_faq_norm = normalizar_texto_faq(pergunta_faq)
+        termos_faq = extrair_termos_faq(pergunta_faq)
+
+        comuns = termos_pergunta.intersection(termos_faq)
+        score = len(comuns) * 10
+
+        for termo in termos_pergunta:
+            if termo in pergunta_faq_norm:
+                score += 2
+
+        if pergunta_norm and pergunta_norm in pergunta_faq_norm:
+            score += 15
+
+        if score > 0:
+            resultados.append({
+                "faq_id": faq_id,
+                "pergunta": pergunta_faq,
+                "score": score
+            })
+
+    resultados.sort(key=lambda item: item["score"], reverse=True)
+
+    vistos = set()
+    unicos = []
+
+    for resultado in resultados:
+        chave = normalizar_texto_faq(resultado["pergunta"])
+
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(resultado)
+
+    return unicos[:limite]
 
 @app.route("/obter-resposta", methods=["POST"])
 def obter_resposta():
@@ -95,11 +231,15 @@ def obter_resposta():
                         "pergunta_faq": resultado["pergunta"],
                         "documentos": docs
                     })
+                sugestoes = procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma=idioma)
+
                 registar_pergunta_nao_respondida(chatbot_id, pergunta, "faq")
                 return jsonify({
-                    "success": False,
-                    "erro": obter_mensagem_sem_resposta(chatbot_id),
-                    "no_answer": True
+                "success": False,
+                "erro": obter_mensagem_sem_resposta(chatbot_id),
+                "no_answer": True,
+                "prompt_rag": True,
+                "sugestoes_faq": sugestoes
                 })
             elif fonte == "faiss":
                 faiss_resultados = pesquisar_faiss(
@@ -212,14 +352,17 @@ def obter_resposta():
                             "erro": "Nao foi possivel encontrar uma resposta nos documentos PDF."
                         })
                 else:
-                    print("DEBUG: feedback != 'try_rag' -> devolve prompt_rag")
+                    print("DEBUG: feedback != 'try_rag' -> devolve prompt_rag com sugestões")
+                    sugestoes = procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma=idioma)
+
                     return jsonify({
-                        "success": False,
-                        "erro": "Pergunta nÃ£o encontrada nas FAQs. Deseja tentar encontrar uma resposta nos documentos PDF? Isso pode levar alguns segundos.",
-                        "prompt_rag": True
+                    "success": False,
+                    "erro": "Pergunta não encontrada nas FAQs. Deseja tentar encontrar uma resposta nos documentos PDF? Isso pode levar alguns segundos.",
+                    "prompt_rag": True,
+                    "sugestoes_faq": sugestoes
                     })
             else:
-                return jsonify({"success": False, "erro": "Fonte invÃ¡lida."}), 400
+                return jsonify({"success": False, "erro": "Fonte inválida."}), 400
         except Exception as inner_e:
             print(traceback.format_exc())
             return jsonify({"success": False, "erro": str(inner_e)}), 500

@@ -1560,6 +1560,15 @@ function enviarPergunta() {
   responderPergunta(texto);
 }
 
+function escapeHtmlChat(valor) {
+  return String(valor || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function responderPergunta(pergunta) {
   const chatbotId = parseInt(localStorage.getItem("chatbotAtivo"));
   if (!chatbotId || isNaN(chatbotId)) {
@@ -1572,12 +1581,18 @@ function responderPergunta(pergunta) {
     );
   }
   if (window.awaitingRagConfirmation) {
+  const perguntaNormalizada = String(pergunta || "").trim().toLowerCase();
+
+  if (perguntaNormalizada === "sim" || perguntaNormalizada === "yes") {
     adicionarMensagem(
       "bot",
       "Por favor, utilize o link acima para confirmar se pretende pesquisar nos documentos PDF.",
     );
     return;
   }
+
+  window.awaitingRagConfirmation = false;
+}
   const fonte =
     localStorage.getItem(`fonteSelecionada_bot${chatbotId}`) || "faq";
   const idioma = getIdiomaAtual();
@@ -1743,7 +1758,46 @@ function responderPergunta(pergunta) {
         msgDiv.style.whiteSpace = "pre-line";
         msgDiv.style.backgroundColor = corBot;
         msgDiv.style.color = "#fff";
-        msgDiv.innerHTML = `Pergunta não encontrada nas FAQs.<br>
+        const sugestoesFaq = Array.isArray(data.sugestoes_faq)
+  ? data.sugestoes_faq
+  : [];
+
+const sugestoesHtml = sugestoesFaq.length
+  ? `
+    <div style="margin-top: 8px; margin-bottom: 10px;">
+      <div style="font-size: 14px; margin-bottom: 7px;">
+        Não encontrei uma resposta exata nas FAQs, mas encontrei algumas opções relacionadas:
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        ${sugestoesFaq
+          .map((item, index) => {
+            const perguntaSugestao = escapeHtmlChat(item.pergunta);
+            return `
+              <button class="faq-sugestao-link"
+                data-pergunta="${perguntaSugestao}"
+                style="
+                  background: #fff;
+                  color: ${corBot};
+                  border: 1.5px solid #fff;
+                  border-radius: 7px;
+                  padding: 7px 10px;
+                  text-align: left;
+                  cursor: pointer;
+                  font-weight: 600;
+                  font-size: 14px;">
+                ${index + 1}. ${perguntaSugestao}
+              </button>
+            `;
+          })
+          .join("")}
+      </div>
+      <div style="font-size: 13px; opacity: .9; margin-top: 8px;">
+        Pode clicar numa das opções acima ou tentar pesquisar nos documentos PDF.
+      </div>
+    </div>
+  `
+  : `Pergunta não encontrada nas FAQs.<br>`;
+        msgDiv.innerHTML = `${sugestoesHtml}
         <a id="confirmar-rag-link" href="#" style="
           color: #fff; background: ${corBot}; border: 2px solid #fff;
           border-radius: 8px; padding: 5px 17px; font-weight: bold;
@@ -1760,6 +1814,19 @@ function responderPergunta(pergunta) {
         chat.appendChild(wrapper);
         chat.scrollTop = chat.scrollHeight;
         setTimeout(() => {
+          document.querySelectorAll(".faq-sugestao-link").forEach((btn) => {
+  btn.onclick = function (e) {
+    e.preventDefault();
+
+    const perguntaSugestao = this.getAttribute("data-pergunta");
+    if (!perguntaSugestao) return;
+
+    window.awaitingRagConfirmation = false;
+
+    adicionarMensagem("user", perguntaSugestao);
+    responderPergunta(perguntaSugestao);
+  };
+});
           const confirmarRag = document.getElementById("confirmar-rag-link");
           if (confirmarRag) {
             confirmarRag.onclick = function (e) {
