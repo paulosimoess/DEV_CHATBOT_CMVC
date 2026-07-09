@@ -145,6 +145,91 @@ def procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma="pt", limite=5)
 
     return unicos[:limite]
 
+
+def pergunta_sobre_preco_ou_taxa(pergunta):
+    """
+    Deteta perguntas em que o utilizador pretende saber preço, custo, valor,
+    taxa ou pagamento. Nestes casos, no modo FAQ + IA/RAG, o sistema deve
+    consultar os documentos PDF antes de devolver apenas a resposta da FAQ.
+    """
+    texto = normalizar_texto_faq(pergunta)
+    termos = set(texto.split())
+
+    expressoes = [
+        "quanto custa",
+        "quanto custam",
+        "qual o custo",
+        "qual e o custo",
+        "qual o preco",
+        "qual e o preco",
+        "quanto pago",
+        "quanto devo pagar",
+        "quanto tenho de pagar",
+        "quanto se paga",
+        "qual o valor",
+        "qual e o valor",
+        "valor da taxa",
+        "valor das taxas",
+        "preco da taxa",
+        "custo da taxa",
+    ]
+
+    termos_preco = {
+        "preco", "precos",
+        "custo", "custos",
+        "valor", "valores",
+        "taxa", "taxas",
+        "pagar", "pagamento",
+        "pago", "paga",
+        "emolumento", "emolumentos",
+        "euros", "eur",
+    }
+
+    return any(expr in texto for expr in expressoes) or bool(termos.intersection(termos_preco))
+
+
+def responder_via_rag_pgvector(cur, pergunta, chatbot_id):
+    """
+    Tenta responder usando RAG/pgvector e devolve um jsonify pronto.
+    Se não encontrar resposta nos documentos, devolve None para permitir fallback.
+    """
+    print("DEBUG: A tentar responder via RAG (PDF) via pgvector")
+    resposta_rag, fontes = pesquisar_pdf_pgvector(pergunta, chatbot_id=chatbot_id)
+
+    if not resposta_rag:
+        return None
+
+    ai_notice = ""
+    try:
+        cur.execute(
+            "SELECT mensagem_gerada_ai FROM chatbot WHERE chatbot_id = %s",
+            (chatbot_id,),
+        )
+        r = cur.fetchone()
+        ai_notice = (r[0] or "").strip() if r else ""
+    except Exception:
+        ai_notice = ""
+
+    pdf_ids = []
+    for f in fontes or []:
+        pdf_id = f.get("pdf_id") if isinstance(f, dict) else None
+        if pdf_id is not None and pdf_id not in pdf_ids:
+            pdf_ids.append(pdf_id)
+
+    return jsonify({
+        "success": True,
+        "fonte": "RAG-PGVECTOR",
+        "resposta": resposta_rag,
+        "ai_generated": True,
+        "ai_notice": ai_notice,
+        "faq_id": None,
+        "categoria_id": None,
+        "score": None,
+        "pergunta_faq": None,
+        "documentos": [url_for("api.uploads.get_pdf", pdf_id=pid) for pid in pdf_ids]
+    })
+
+
 @app.route("/obter-resposta", methods=["POST"])
 def obter_resposta():
     conn = get_conn()
@@ -167,6 +252,7 @@ def obter_resposta():
             chatbot_id = int(chatbot_id)
         except Exception:
             return jsonify({"success": False, "erro": "Chatbot ID invÃ¡lido."}), 400
+
         saudacao = detectar_saudacao(pergunta)
         if saudacao:
             return jsonify({
@@ -178,17 +264,31 @@ def obter_resposta():
                 "pergunta_faq": None,
                 "documentos": []
             })
+
         if not pergunta or (len(pergunta) < 4 and not any(char.isalpha() for char in pergunta)):
             return jsonify({
                 "success": False,
                 "erro": "Pergunta demasiado curta ou nÃ£o reconhecida como vÃ¡lida."
             })
+
         if fonte == "faq+raga" and (feedback is None or feedback == "") and pergunta.lower() in ["sim", "yes"]:
             return jsonify({
                 "success": False,
                 "erro": "Por favor utilize os botÃµes abaixo para confirmar.",
                 "prompt_rag": True
             })
+
+        # Melhoria para perguntas sobre preços/taxas:
+        # Independentemente da fonte enviada pelo frontend, se a pergunta for sobre
+        # custo, preço, valor, taxa ou pagamento, consulta primeiro os PDFs/RAG.
+        # Isto permite que o bot 47 vá buscar valores ao PDF da tabela de taxas,
+        # em vez de responder apenas com a FAQ do procedimento.
+        if pergunta_sobre_preco_ou_taxa(pergunta):
+            print("DEBUG: Pergunta sobre preço/custo/taxa detetada antes da FAQ -> consultar RAG")
+            resposta_json = responder_via_rag_pgvector(cur, pergunta, chatbot_id)
+            if resposta_json:
+                return resposta_json
+
         try:
             if fonte == "faq":
                 resultado = obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=idioma)
@@ -231,16 +331,18 @@ def obter_resposta():
                         "pergunta_faq": resultado["pergunta"],
                         "documentos": docs
                     })
+
                 sugestoes = procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma=idioma)
 
                 registar_pergunta_nao_respondida(chatbot_id, pergunta, "faq")
                 return jsonify({
-                "success": False,
-                "erro": obter_mensagem_sem_resposta(chatbot_id),
-                "no_answer": True,
-                "prompt_rag": True,
-                "sugestoes_faq": sugestoes
+                    "success": False,
+                    "erro": obter_mensagem_sem_resposta(chatbot_id),
+                    "no_answer": True,
+                    "prompt_rag": True,
+                    "sugestoes_faq": sugestoes
                 })
+
             elif fonte == "faiss":
                 faiss_resultados = pesquisar_faiss(
                     pergunta,
@@ -291,8 +393,20 @@ def obter_resposta():
                         "success": False,
                         "erro": "NÃ£o encontrei nenhuma resposta suficientemente semelhante na base de dados."
                     })
+
             elif fonte == "faq+raga":
                 resultado = obter_faq_mais_semelhante(pergunta, chatbot_id, idioma=idioma)
+
+                # Melhoria para o modo FAQ + IA/RAG:
+                # Se a pergunta for sobre preço, custo, valor, taxa ou pagamento,
+                # consulta primeiro os documentos PDF via RAG. Isto permite responder
+                # com informação complementar que não está diretamente na FAQ.
+                if pergunta_sobre_preco_ou_taxa(pergunta):
+                    print("DEBUG: Pergunta sobre preço/custo/taxa -> consultar RAG antes da FAQ")
+                    resposta_json = responder_via_rag_pgvector(cur, pergunta, chatbot_id)
+                    if resposta_json:
+                        return resposta_json
+
                 if resultado:
                     cur.execute("""
                         SELECT faq_id, categoria_id, video_status FROM faq
@@ -314,61 +428,39 @@ def obter_resposta():
                         "pergunta_faq": resultado["pergunta"],
                         "documentos": docs
                     })
+
                 elif feedback and feedback.strip().lower() == "try_rag":
-                    print("DEBUG: A tentar responder via RAG (PDF) via pgvector")
-                    resposta_rag, fontes = pesquisar_pdf_pgvector(pergunta, chatbot_id=chatbot_id)
-                    if resposta_rag:
-                        # Optional AI warning message configured per chatbot
-                        ai_notice = ""
-                        try:
-                            cur.execute(
-                                "SELECT mensagem_gerada_ai FROM chatbot WHERE chatbot_id = %s",
-                                (chatbot_id,),
-                            )
-                            r = cur.fetchone()
-                            ai_notice = (r[0] or "").strip() if r else ""
-                        except Exception:
-                            ai_notice = ""
-                        pdf_ids = []
-                        for f in fontes:
-                            if f["pdf_id"] not in pdf_ids:
-                                pdf_ids.append(f["pdf_id"])
-                        return jsonify({
-                            "success": True,
-                            "fonte": "RAG-PGVECTOR",
-                            "resposta": resposta_rag,
-                            "ai_generated": True,
-                            "ai_notice": ai_notice,
-                            "faq_id": None,
-                            "categoria_id": None,
-                            "score": None,
-                            "pergunta_faq": None,
-                            # Return URLs that are valid behind reverse-proxy (avoid leaking server paths)
-                            "documentos": [url_for("api.uploads.get_pdf", pdf_id=pid) for pid in pdf_ids]
-                        })
+                    resposta_json = responder_via_rag_pgvector(cur, pergunta, chatbot_id)
+                    if resposta_json:
+                        return resposta_json
                     else:
                         return jsonify({
                             "success": False,
                             "erro": "Nao foi possivel encontrar uma resposta nos documentos PDF."
                         })
+
                 else:
                     print("DEBUG: feedback != 'try_rag' -> devolve prompt_rag com sugestões")
                     sugestoes = procurar_faqs_relacionadas(cur, pergunta, chatbot_id, idioma=idioma)
 
                     return jsonify({
-                    "success": False,
-                    "erro": "Pergunta não encontrada nas FAQs. Deseja tentar encontrar uma resposta nos documentos PDF? Isso pode levar alguns segundos.",
-                    "prompt_rag": True,
-                    "sugestoes_faq": sugestoes
+                        "success": False,
+                        "erro": "Pergunta não encontrada nas FAQs. Deseja tentar encontrar uma resposta nos documentos PDF? Isso pode levar alguns segundos.",
+                        "prompt_rag": True,
+                        "sugestoes_faq": sugestoes
                     })
+
             else:
                 return jsonify({"success": False, "erro": "Fonte inválida."}), 400
+
         except Exception as inner_e:
             print(traceback.format_exc())
             return jsonify({"success": False, "erro": str(inner_e)}), 500
+
     except Exception as e:
         print(traceback.format_exc())
         return jsonify({"success": False, "erro": str(e)}), 500
+
     finally:
         try:
             cur.close()
@@ -378,6 +470,7 @@ def obter_resposta():
             conn.close()
         except Exception:
             pass
+
 
 @app.route("/perguntas-semelhantes", methods=["POST"])
 def perguntas_semelhantes():
@@ -416,6 +509,7 @@ def perguntas_semelhantes():
         cur.close()
         conn.close()
 
+
 @app.route("/faqs-aleatorias", methods=["POST"])
 def faqs_aleatorias():
     conn = get_conn()
@@ -449,10 +543,12 @@ def faqs_aleatorias():
         cur.close()
         conn.close()
 
+
 @app.route("/rebuild-faiss", methods=["POST"])
 def rebuild_faiss():
     build_faiss_index()
     return jsonify({"success": True, "msg": "FAISS index rebuilt."})
+
 
 @app.route("/faq-categoria/<categoria>", methods=["GET"])
 def obter_faq_por_categoria(categoria):
@@ -490,6 +586,7 @@ def obter_faq_por_categoria(categoria):
         cur.close()
         conn.close()
 
+
 @app.route("/perguntas-nao-respondidas", methods=["GET"])
 def nao_respondidas():
     conn = get_conn()
@@ -516,7 +613,7 @@ def nao_respondidas():
                 "fonte": row[3],
                 "max_score": row[4],
                 "estado": row[5],
-                "criado_em": row[6],  
+                "criado_em": row[6],
             }
             for row in rows
         ]
@@ -528,6 +625,7 @@ def nao_respondidas():
     finally:
         cur.close()
         conn.close()
+
 
 @app.route("/perguntas-nao-respondidas/metricas", methods=["GET"])
 def metricas_nao_respondidas():
@@ -582,7 +680,8 @@ def metricas_nao_respondidas():
         cur.close()
         conn.close()
 
-@app.route("/perguntas-nao-respondidas/<int:pergunta_id>", methods=["DELETE"]) 
+
+@app.route("/perguntas-nao-respondidas/<int:pergunta_id>", methods=["DELETE"])
 def delete_pergunta_nao_respondida(pergunta_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -599,6 +698,7 @@ def delete_pergunta_nao_respondida(pergunta_id):
     finally:
         cur.close()
         conn.close()
+
 
 @app.route("/perguntas-nao-respondidas/<int:pergunta_id>", methods=["PUT"])
 def update_pergunta_nao_respondida(pergunta_id):
@@ -626,4 +726,4 @@ def update_pergunta_nao_respondida(pergunta_id):
         return jsonify({"success": False, "error": str(e)}), 500
     finally:
         cur.close()
-        conn.close()      
+        conn.close()
